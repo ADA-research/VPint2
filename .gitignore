@@ -7,27 +7,5 @@
 # Python egg metadata, regenerated from source files by setuptools.
 /*.egg-info
 
-# Testing notebooks
-*.ipynb
+# Notebook checkpoints
 *.ipynb_checkpoints
-
-# Autokeras directory
-autokeras/
-
-# Smac directory
-smac/
-
-# Smac run file
-run_smac.py
-
-# Results
-results/
-
-# Build
-build/
-
-# Autosklearn output
-autosklearn/
-
-# Baseline code
-baselines/
