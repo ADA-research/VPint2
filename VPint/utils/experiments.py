@@ -13,10 +13,14 @@ import os
 
 from math import log10, sqrt
 
-def run_experiments_2D(grid_true,f_grid,alg,iterations,params,hidden_method="random",save=False):
+def run_experiments_2D(grid_true,f_grid,alg,iterations,params,hidden_method="random",save=False,grid_train=None,f_grid_train=None):
 
     result_grids = np.zeros((iterations,grid_true.shape[0],grid_true.shape[1]))
     runtimes = np.zeros(iterations)
+    
+    if(grid_train is None or f_grid_train is None):
+        grid_train = grid_true.copy()
+        f_grid_train = f_grid.copy()
         
     for it in range(0,iterations):
     
@@ -40,7 +44,10 @@ def run_experiments_2D(grid_true,f_grid,alg,iterations,params,hidden_method="ran
         elif(alg == "WP_MRP"):
             MRP = WP_SMRP(grid,f_grid,model=params["model"])
             if(params["method"] == "predict"):
-                MRP.train()
+                if grid_train is not None:
+                    MRP.train(training_set=grid_train,training_features=f_grid_train)
+                else:
+                    MRP.train()
             tt = time.time()
             pred_grid = MRP.run(iterations=params["iterations"],auto_terminate=params["auto_iter"],method=params["method"])
             rt = time.time()
@@ -53,27 +60,27 @@ def run_experiments_2D(grid_true,f_grid,alg,iterations,params,hidden_method="ran
             pred_grid, var_grid = VPint.utils.baselines_2D.universal_kriging(grid,params["variogram_model"])
             rt = time.time()
         elif(alg == "basic"):
-            model = VPint.utils.baselines_2D.regression_train(grid,f_grid,params["model"])
+            model = VPint.utils.baselines_2D.regression_train(grid_train,f_grid_train,params["model"])
             tt = time.time()
             pred_grid = VPint.utils.baselines_2D.regression_run(grid,f_grid,model)
             rt = time.time()
         elif(alg == "SAR"):
-            model = VPint.utils.baselines_2D.SAR_train(grid,f_grid,params["model"])
+            model = VPint.utils.baselines_2D.SAR_train(grid_train,f_grid_train,params["model"])
             tt = time.time()
             pred_grid = VPint.utils.baselines_2D.SAR_run(grid,f_grid,model)
             rt = time.time()
         elif(alg == "MA"):
-            model, sub_model, sub_error_grid = VPint.utils.baselines_2D.MA_train(grid,f_grid,params["model"],params["sub_model"])
+            model, sub_model, sub_error_grid = VPint.utils.baselines_2D.MA_train(grid_train,f_grid_train,params["model"],params["sub_model"])
             tt = time.time()
             pred_grid = VPint.utils.baselines_2D.MA_run(grid,f_grid,model,sub_model,sub_error_grid)
             rt = time.time()
         elif(alg == "ARMA"):
-            model, sub_model, sub_error_grid = VPint.utils.baselines_2D.ARMA_train(grid,f_grid,params["model"],params["sub_model"])
+            model, sub_model, sub_error_grid = VPint.utils.baselines_2D.ARMA_train(grid_train,f_grid_train,params["model"],params["sub_model"])
             tt = time.time()
             pred_grid = VPint.utils.baselines_2D.ARMA_run(grid,f_grid,model,sub_model,sub_error_grid)
             rt = time.time()
         elif(alg == "CNN"):
-            model = VPint.utils.baselines_2D.CNN_train_pixel(grid,f_grid,params["nn_model"],max_trials=params["nn_max_trials"],
+            model = VPint.utils.baselines_2D.CNN_train_pixel(grid_train,f_grid_train,params["nn_model"],max_trials=params["nn_max_trials"],
                                     epochs=params["nn_epochs"],train_fill=params["nn_train_fill"],
                                    window_height=params["nn_window_height"],
                                     window_width=params["nn_window_width"])
@@ -212,7 +219,10 @@ def compute_measures(pred,true,mask):
     if(mse2 == 0):
         return(1)
     max_pixel = 255.0
-    psnr = 20 * log10(max_pixel / sqrt(mse2)) / 100 # /100 because I want 0-1
+    try:
+        psnr = 20 * log10(max_pixel / sqrt(mse2)) / 100 # /100 because I want 0-1
+    except:
+        psnr = 1
 
     # SSIM
     flattened_mask = mask.copy().reshape((np.prod(mask.shape)))

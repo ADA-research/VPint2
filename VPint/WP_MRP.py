@@ -52,7 +52,7 @@ class WP_SMRP(SMRP):
         compute an indication of uncertainty per pixel in pred_grid
     """    
     
-    def __init__(self,grid,feature_grid,model=None,init_strategy='mean',max_gamma=np.inf,min_gamma=0,mask=None):
+    def __init__(self,grid,feature_grid,model=None,init_strategy='mean',max_gamma=np.inf,min_gamma=0,mask=None,clip_val=np.inf):
         # Check shapes
         if(grid.shape[0] != feature_grid.shape[0] or grid.shape[1] != feature_grid.shape[1]):
             raise VPintError("Target and feature grids have different shapes: " + str(grid.shape) + " and " + str(feature_grid.shape))
@@ -74,18 +74,21 @@ class WP_SMRP(SMRP):
         self.model = model 
         self.max_gamma = max_gamma
         self.min_gamma = min_gamma
+        self.clip_val = clip_val
         self._run_state = False
         self._run_method = "predict"
     
             
-    def run(self,iterations=-1,method='exact',auto_terminate=True,auto_terminate_threshold=1e-4,track_delta=False, 
-            confidence=False,confidence_model=None, save_gif=False,gif_path="convergence.gif", 
+    def run(self, iterations=-1, method='exact', auto_terminate=True, auto_terminate_threshold=1e-4, track_delta=False, 
+            confidence=False, confidence_model=None, 
+            save_gif=False, gif_path="convergence.gif", gif_ms_per_frame=100, store_gif_source=False, gif_size_up=20, gif_clip_iter=100,
             auto_adapt=False,auto_adaptation_epochs=100,auto_adaptation_proportion=0.5, 
             auto_adaptation_strategy='random',auto_adaptation_max_iter=-1,
             auto_adaptation_subsample_strategy='max_contrast',
             auto_adaptation_verbose=False,
-            prioritise_identity=False,priority_intensity=1, known_value_bias=0, 
-            resistance=False,epsilon=0.01,mu=1.0):
+            prioritise_identity=False, priority_intensity=1, known_value_bias=0, 
+            resistance=False, epsilon=0.01, mu=1.0, 
+            clip_val=np.inf):
         """
         Runs WP-SMRP for the specified number of iterations. Creates a 3D (h,w,4) tensor val_grid, where the z-axis corresponds to a neighbour of each cell, and a 3D (h,w,4) weight tensor weight_grid, where the z-axis corresponds to the weights of every neighbour in val_grid's z-axis. The x and y axes of both tensors are stacked into 2D (h*w,4) matrices (one of which is transposed), after which the dot product is taken between both matrices, resulting in a (h*w,h*w) matrix. As we are only interested in multiplying the same row numbers with the same column numbers, we take the diagonal entries of the computed matrix to obtain a 1D (h*w) vector of updated values (we use numpy's einsum to do this efficiently, without wasting computation on extra dot products). This vector is then divided element-wise by a vector (flattened 2D grid) counting the number of neighbours of each cell, and we use the object's original_grid to replace wrongly updated known values to their original true values. We finally reshape this vector back to the original 2D pred_grid shape of (h,w).
         
@@ -110,8 +113,13 @@ class WP_SMRP(SMRP):
             auto_terminate = False
         else:
             iterations = 5000
+
+        if(save_gif):
+            progression = np.zeros((iterations, self.pred_grid.shape[0], self.pred_grid.shape[1]))
                
         # Setup all this once
+        
+        self.clip_val = clip_val
         
         height = self.pred_grid.shape[0]
         width = self.pred_grid.shape[1]
@@ -143,12 +151,12 @@ class WP_SMRP(SMRP):
             down_grid = np.ones((height,width,feature_size))
             left_grid = np.ones((height,width,feature_size))
 
-            up_grid[1:-1,:,:] = f_grid[0:-2,:,:]
-            right_grid[:,0:-2,:] = f_grid[:,1:-1,:]
-            down_grid[0:-2,:,:] = f_grid[1:-1,:,:]
-            left_grid[:,1:-1,:] = f_grid[:,0:-2,:]
+            up_grid[1:,:,:] = f_grid[0:-1,:,:]
+            right_grid[:,0:-1,:] = f_grid[:,1:,:]
+            down_grid[0:-1,:,:] = f_grid[1:,:,:]
+            left_grid[:,1:,:] = f_grid[:,0:-1,:]
 
-            # Compute weights exacly
+            # Compute weights exacly (coming in from direction to source, e.g., up means going from neighbour above to source)
 
             up_weights = np.mean(f_grid / up_grid, axis=2)
             up_weights[0,:] = 0
@@ -185,7 +193,7 @@ class WP_SMRP(SMRP):
                         vec[3] = self.predict_weight(f1,f2,method)
 
                     weight_grid[i,j,:] = vec
-        
+
         weight_matrix = weight_grid.reshape((height*width,4)).transpose()
         
         # Set neighbour count grid
@@ -208,23 +216,30 @@ class WP_SMRP(SMRP):
             if(resistance):
                 params.append('epsilon')
                 params.append('mu')
+            
+            # In case some configurations cause, e.g., overflow issues
+            fail_counter = 0
+            while True: 
+                if(fail_counter >= 3):
+                    print("Auto-adaptation failed 3 times; proceeding with default parameters")
+                    break
+                try:
+                    params_opt = self.auto_adapt(params, auto_adaptation_epochs,auto_adaptation_proportion, search_strategy=auto_adaptation_strategy, max_sub_iter=auto_adaptation_max_iter, subsample_strategy=auto_adaptation_subsample_strategy)
+                    if(auto_adaptation_verbose):
+                        print("Best found params: " + str(params_opt))
+                    for k,v in params_opt.items():
+                        if(k=='beta'):
+                            priority_intensity = params_opt[k]
+                        elif(k=='epsilon'):
+                            epsilon = params_opt[k]
+                        elif(k=='mu'):
+                            mu = params_opt[k]
+                    break
+                except:
+                    fail_counter += 1
                 
-            params_opt = self.auto_adapt(params, auto_adaptation_epochs,auto_adaptation_proportion,
-                                                          search_strategy=auto_adaptation_strategy, 
-                                                          max_sub_iter=auto_adaptation_max_iter,
-                                                          subsample_strategy=auto_adaptation_subsample_strategy)
-            if(auto_adaptation_verbose):
-                print("Best found params: " + str(params_opt))
-            for k,v in params_opt.items():
-                if(k=='beta'):
-                    priority_intensity = params_opt[k]
-                elif(k=='epsilon'):
-                    epsilon = params_opt[k]
-                elif(k=='mu'):
-                    mu = params_opt[k]
-                
-        if(priority_intensity==0):
-            prioritise_identity=False
+        #if(priority_intensity==0):
+        #    prioritise_identity=False
         if(prioritise_identity):
             # Prioritise weights close to 1, under the assumption they will be
             # more informative/constant. 
@@ -232,10 +247,17 @@ class WP_SMRP(SMRP):
             if(priority_intensity==0):
                 # Same as no priority
                 priority_grid = np.ones(weight_grid.shape)
+                # Since we later divide by sum of priority weights (replacing neighbour count grid),
+                # we need to set some 0s for edges
+                priority_grid[0,:,0] = 0.0 # up
+                priority_grid[:,-1,1] = 0.0 # right
+                priority_grid[-1,:,2] = 0.0 # down
+                priority_grid[:,0,3] = 0.0 # left
             else:
                 priority_grid = weight_grid.copy()
                 priority_grid[priority_grid>1] = 1/priority_grid[priority_grid>1] * (1/priority_grid[priority_grid>1] / (1/priority_grid[priority_grid>1] * priority_intensity))
                 priority_grid[priority_grid<1] = priority_grid[priority_grid<1] * (priority_grid[priority_grid<1] / ((priority_grid[priority_grid<1]+0.001) * priority_intensity))
+            self.priority_grid = priority_grid # for debugging access
             
             # Prioritise known values
             if(known_value_bias>0):
@@ -266,19 +288,19 @@ class WP_SMRP(SMRP):
             # Set val_grid
             
             # Up
-            val_grid[1:h+1,:,0] = self.pred_grid[0:h,:] # +1 because it's non-inclusive (0:10 means 0-9)
+            val_grid[1:,:,0] = self.pred_grid[0:-1,:]
             val_grid[0,:,0] = np.zeros((width))
-            
+
             # Right
-            val_grid[:,0:w,1] = self.pred_grid[:,1:w+1]
-            val_grid[:,w,1] = np.zeros((height))
-            
+            val_grid[:,0:-1,1] = self.pred_grid[:,1:]
+            val_grid[:,-1,1] = np.zeros((height))
+
             # Down
-            val_grid[0:h,:,2] = self.pred_grid[1:h+1,:]
-            val_grid[h,:,2] = np.zeros((width))
-            
+            val_grid[0:-1,:,2] = self.pred_grid[1:,:]
+            val_grid[-1,:,2] = np.zeros((width))
+
             # Left
-            val_grid[:,1:w+1,3] = self.pred_grid[:,0:w]
+            val_grid[:,1:,3] = self.pred_grid[:,0:-1]
             val_grid[:,0,3] = np.zeros((height))
                         
             # Compute new values, update pred grid
@@ -288,7 +310,7 @@ class WP_SMRP(SMRP):
                 # element wise multiplication weight+vals
                 individual_predictions = np.multiply(weight_matrix.transpose(),val_matrix)
                 # dot product with priority weights
-                new_grid = np.einsum('ij,ji->i', individual_predictions,priority_grid.reshape(height*width,4).transpose()) 
+                new_grid = np.einsum('ij,ji->i', individual_predictions,priority_grid.reshape(height*width,4).transpose())              
                 # divide by sum of priority weights
                 new_grid = new_grid / np.sum(priority_grid,axis=2).reshape(height*width)
                 
@@ -297,6 +319,7 @@ class WP_SMRP(SMRP):
                 new_grid = new_grid / neighbour_count_vec # Correct for neighbour count
                 
             flattened_original = self.original_grid.copy().reshape((height*width)) # can't use argwhere with 2D indexing
+            new_grid[new_grid > self.clip_val] = self.clip_val # If set to lower than inf, prevent values from rising past threshold
             new_grid[np.argwhere(~np.isnan(flattened_original))] = flattened_original[np.argwhere(~np.isnan(flattened_original))] # Keep known values from original           
             new_grid = new_grid.reshape((height,width)) # Return to 2D grid
             
@@ -334,12 +357,35 @@ class WP_SMRP(SMRP):
                         self.pred_grid = new_grid
                         if(track_delta):
                             delta_vec = delta_vec[0:it+1]
+                        if(save_gif or store_gif_source):
+                            progression = progression[:it, :, :]
                         break
+
+            if(save_gif or store_gif_source):
+                progression[it, :, :] = new_grid.copy()
                 
             self.pred_grid = new_grid
             
         self.run_state = True
         self.run_method = method
+
+        if(store_gif_source):
+            self.progression = progression
+
+        if(save_gif):
+            # WIP, currently not working (this is for RGB, VPint is band-specific, would need to re-code into multi-band wrapper)
+            from PIL import Image
+            progression = (progression / np.nanmax(progression[0:gif_clip_iter, :, :, :]) * 255)
+            progression = progression.clip(0, 255.0)
+
+            res = np.repeat(progression, gif_size_up, axis=1)
+            res = res.reshape((progression.shape[0], progression.shape[1]*gif_size_up, progression.shape[2], progression.shape[3]))
+            res = np.repeat(res, gif_size_up, axis=2)
+            res = res.reshape((progression.shape[0], progression.shape[1]*gif_size_up, progression.shape[2]*gif_size_up, progression.shape[3]))
+
+            gif_data = [Image.fromarray(progression[it,:,:,:].astype(np.uint8), 'RGB') for it in range(0, progression.shape[0])]
+            gif_data[0].save(gif_path, save_all=True, append_images=gif_data[1:], duration=gif_ms_per_frame, loop=0)
+
                         
         if(track_delta):
             return(self.pred_grid,delta_vec)
@@ -841,6 +887,10 @@ class WP_SMRP(SMRP):
         return(best_val)
         
     
+    def get_progression(self):
+        return(self.progression)
+
+
     def contrast_map(self,grid):
         """
         Create a contrast map of the feature grid, which can be used by find_beta to select pixels to sample. Contrast is computed as the mean average distance between a pixel and its neighbours, normalised to a 0-1 range.
@@ -854,11 +904,11 @@ class WP_SMRP(SMRP):
         # Create neighbour count grid
         neighbour_count_grid = np.ones(grid.shape) * 4
 
-        neighbour_count_grid[:,0] = neighbour_count_grid[:,0] - np.ones(neighbour_count_grid.shape[1])
-        neighbour_count_grid[:,width-1] = neighbour_count_grid[:,width-1] - np.ones(neighbour_count_grid.shape[1])
+        neighbour_count_grid[:,0] = neighbour_count_grid[:,0] - np.ones(neighbour_count_grid.shape[0]) # Full row, so shape[0]
+        neighbour_count_grid[:,width-1] = neighbour_count_grid[:,width-1] - np.ones(neighbour_count_grid.shape[0])
 
-        neighbour_count_grid[0,:] = neighbour_count_grid[0,:] - np.ones(neighbour_count_grid.shape[0])
-        neighbour_count_grid[height-1,:] = neighbour_count_grid[height-1,:] - np.ones(neighbour_count_grid.shape[0])
+        neighbour_count_grid[0,:] = neighbour_count_grid[0,:] - np.ones(neighbour_count_grid.shape[1]) # Full col, so shape[0]
+        neighbour_count_grid[height-1,:] = neighbour_count_grid[height-1,:] - np.ones(neighbour_count_grid.shape[1])
 
         # Create (h*w*4) value grid
         val_grid = np.zeros((height,width,4))
